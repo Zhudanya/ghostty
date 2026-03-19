@@ -35,6 +35,9 @@ pub fn main() !void {
     // Our output always goes to stdout.
     var buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&buffer);
+    // Use streaming mode: the build system captures stdout via a pipe,
+    // and pipes do not support ftruncate (used by positional mode's end()).
+    stdout_writer.mode = .streaming;
     const writer = &stdout_writer.interface;
     switch (action) {
         .bash => try writer.writeAll(@import("extra/bash.zig").completions),

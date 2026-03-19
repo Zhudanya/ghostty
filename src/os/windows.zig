@@ -130,4 +130,168 @@ pub const exp = struct {
     }
 
     pub const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = ProcThreadAttributeValue(.ProcThreadAttributePseudoConsole, false, true, false);
+
+    // ── Win32 GUI types ──────────────────────────────────────────────
+    pub const HWND = windows.HWND;
+    pub const HINSTANCE = windows.HINSTANCE;
+    pub const HDC = *anyopaque;
+    pub const HGLRC = *anyopaque;
+    pub const HMENU = *anyopaque;
+    pub const HICON = *anyopaque;
+    pub const HCURSOR = *anyopaque;
+    pub const HBRUSH = *anyopaque;
+    pub const ATOM = u16;
+    pub const UINT = u32;
+    pub const WPARAM = usize;
+    pub const LPARAM = isize;
+    pub const LRESULT = isize;
+    pub const WNDPROC = *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) LRESULT;
+
+    pub const POINT = extern struct { x: i32, y: i32 };
+    pub const RECT = extern struct { left: i32, top: i32, right: i32, bottom: i32 };
+
+    pub const MSG = extern struct {
+        hwnd: ?HWND,
+        message: UINT,
+        wParam: WPARAM,
+        lParam: LPARAM,
+        time: DWORD,
+        pt: POINT,
+    };
+
+    pub const WNDCLASSEXW = extern struct {
+        cbSize: UINT = @sizeOf(WNDCLASSEXW),
+        style: UINT = 0,
+        lpfnWndProc: WNDPROC,
+        cbClsExtra: i32 = 0,
+        cbWndExtra: i32 = 0,
+        hInstance: ?HINSTANCE = null,
+        hIcon: ?HICON = null,
+        hCursor: ?HCURSOR = null,
+        hbrBackground: ?HBRUSH = null,
+        lpszMenuName: ?[*:0]const u16 = null,
+        lpszClassName: [*:0]const u16,
+        hIconSm: ?HICON = null,
+    };
+
+    pub const PIXELFORMATDESCRIPTOR = extern struct {
+        nSize: u16 = @sizeOf(PIXELFORMATDESCRIPTOR),
+        nVersion: u16 = 1,
+        dwFlags: DWORD = 0,
+        iPixelType: u8 = 0,
+        cColorBits: u8 = 0,
+        cRedBits: u8 = 0,
+        cRedShift: u8 = 0,
+        cGreenBits: u8 = 0,
+        cGreenShift: u8 = 0,
+        cBlueBits: u8 = 0,
+        cBlueShift: u8 = 0,
+        cAlphaBits: u8 = 0,
+        cAlphaShift: u8 = 0,
+        cAccumBits: u8 = 0,
+        cAccumRedBits: u8 = 0,
+        cAccumGreenBits: u8 = 0,
+        cAccumBlueBits: u8 = 0,
+        cAccumAlphaBits: u8 = 0,
+        cDepthBits: u8 = 0,
+        cStencilBits: u8 = 0,
+        cAuxBuffers: u8 = 0,
+        iLayerType: u8 = 0,
+        bReserved: u8 = 0,
+        dwLayerMask: DWORD = 0,
+        dwVisibleMask: DWORD = 0,
+        dwDamageMask: DWORD = 0,
+    };
+
+    // Window style constants
+    pub const WS_OVERLAPPEDWINDOW = 0x00CF0000;
+    pub const WS_VISIBLE = 0x10000000;
+    pub const CW_USEDEFAULT: i32 = @bitCast(@as(u32, 0x80000000));
+
+    // Window message constants
+    pub const WM_DESTROY = 0x0002;
+    pub const WM_SIZE = 0x0005;
+    pub const WM_PAINT = 0x000F;
+    pub const WM_CLOSE = 0x0010;
+    pub const WM_QUIT = 0x0012;
+    pub const WM_KEYDOWN = 0x0100;
+    pub const WM_KEYUP = 0x0101;
+    pub const WM_CHAR = 0x0102;
+    pub const WM_SYSCOMMAND = 0x0112;
+    pub const WM_TIMER = 0x0113;
+    pub const WM_MOUSEMOVE = 0x0200;
+    pub const WM_LBUTTONDOWN = 0x0201;
+    pub const WM_LBUTTONUP = 0x0202;
+    pub const WM_MOUSEWHEEL = 0x020A;
+    pub const WM_DPICHANGED = 0x02E0;
+
+    // PeekMessage flags
+    pub const PM_REMOVE = 0x0001;
+
+    // Pixel format flags
+    pub const PFD_DRAW_TO_WINDOW = 0x00000004;
+    pub const PFD_SUPPORT_OPENGL = 0x00000020;
+    pub const PFD_DOUBLEBUFFER = 0x00000001;
+    pub const PFD_TYPE_RGBA = 0;
+    pub const PFD_MAIN_PLANE = 0;
+
+    // Timer
+    pub const USER_TIMER_MINIMUM = 0x0000000A;
+
+    // ── user32.dll ───────────────────────────────────────────────────
+    pub const user32 = struct {
+        pub extern "user32" fn RegisterClassExW(lpwcx: *const WNDCLASSEXW) callconv(.winapi) ATOM;
+        pub extern "user32" fn CreateWindowExW(
+            dwExStyle: DWORD,
+            lpClassName: [*:0]const u16,
+            lpWindowName: [*:0]const u16,
+            dwStyle: DWORD,
+            x: i32,
+            y: i32,
+            nWidth: i32,
+            nHeight: i32,
+            hWndParent: ?HWND,
+            hMenu: ?HMENU,
+            hInstance: ?HINSTANCE,
+            lpParam: ?*anyopaque,
+        ) callconv(.winapi) ?HWND;
+        pub extern "user32" fn DestroyWindow(hWnd: HWND) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn ShowWindow(hWnd: HWND, nCmdShow: i32) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn UpdateWindow(hWnd: HWND) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn DefWindowProcW(hWnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
+        pub extern "user32" fn PeekMessageW(lpMsg: *MSG, hWnd: ?HWND, wMsgFilterMin: UINT, wMsgFilterMax: UINT, wRemoveMsg: UINT) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn TranslateMessage(lpMsg: *const MSG) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn DispatchMessageW(lpMsg: *const MSG) callconv(.winapi) LRESULT;
+        pub extern "user32" fn PostQuitMessage(nExitCode: i32) callconv(.winapi) void;
+        pub extern "user32" fn GetClientRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn SetWindowTextW(hWnd: HWND, lpString: [*:0]const u16) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn GetDC(hWnd: ?HWND) callconv(.winapi) ?HDC;
+        pub extern "user32" fn ReleaseDC(hWnd: ?HWND, hDC: HDC) callconv(.winapi) i32;
+        pub extern "user32" fn GetKeyState(nVirtKey: i32) callconv(.winapi) i16;
+        pub extern "user32" fn SetTimer(hWnd: ?HWND, nIDEvent: usize, uElapse: UINT, lpTimerFunc: ?*anyopaque) callconv(.winapi) usize;
+        pub extern "user32" fn KillTimer(hWnd: ?HWND, uIDEvent: usize) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn InvalidateRect(hWnd: ?HWND, lpRect: ?*const RECT, bErase: windows.BOOL) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn GetDpiForWindow(hWnd: HWND) callconv(.winapi) UINT;
+        pub extern "user32" fn LoadCursorW(hInstance: ?HINSTANCE, lpCursorName: usize) callconv(.winapi) ?HCURSOR;
+    };
+
+    // ── gdi32.dll ────────────────────────────────────────────────────
+    pub const gdi32 = struct {
+        pub extern "gdi32" fn ChoosePixelFormat(hdc: HDC, ppfd: *const PIXELFORMATDESCRIPTOR) callconv(.winapi) i32;
+        pub extern "gdi32" fn SetPixelFormat(hdc: HDC, format: i32, ppfd: *const PIXELFORMATDESCRIPTOR) callconv(.winapi) windows.BOOL;
+        pub extern "gdi32" fn SwapBuffers(hdc: HDC) callconv(.winapi) windows.BOOL;
+    };
+
+    // ── opengl32.dll ─────────────────────────────────────────────────
+    pub const opengl32 = struct {
+        pub extern "opengl32" fn wglCreateContext(hdc: HDC) callconv(.winapi) ?HGLRC;
+        pub extern "opengl32" fn wglMakeCurrent(hdc: ?HDC, hglrc: ?HGLRC) callconv(.winapi) windows.BOOL;
+        pub extern "opengl32" fn wglDeleteContext(hglrc: HGLRC) callconv(.winapi) windows.BOOL;
+        pub extern "opengl32" fn wglGetProcAddress(lpszProc: [*:0]const u8) callconv(.winapi) ?*anyopaque;
+    };
+
+    // IDC_ARROW = 32512
+    pub const IDC_ARROW: usize = 32512;
+    // SW_SHOW = 5
+    pub const SW_SHOW: i32 = 5;
 };

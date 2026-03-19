@@ -169,6 +169,10 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
         apprt.gtk,
         => try prepareContext(null),
 
+        // Windows: OpenGL context is already current on the app thread
+        // (created during App.initOpenGL via wglMakeCurrent).
+        apprt.windows => try prepareContext(null),
+
         apprt.embedded => {
             // TODO(mitchellh): this does nothing today to allow libghostty
             // to compile for OpenGL targets but libghostty is strictly
@@ -208,6 +212,9 @@ pub fn threadEnter(self: *const OpenGL, surface: *apprt.Surface) !void {
             // on the main thread. As such, we don't do anything here.
         },
 
+        // Windows: like GTK, we draw from the app thread (must_draw_from_app_thread).
+        apprt.windows => {},
+
         apprt.embedded => {
             // TODO(mitchellh): this does nothing today to allow libghostty
             // to compile for OpenGL targets but libghostty is strictly
@@ -228,6 +235,9 @@ pub fn threadExit(self: *const OpenGL) void {
             // be sharing the global bindings with other windows.
         },
 
+        // Windows: nothing to unload, context lifetime managed by App.
+        apprt.windows => {},
+
         apprt.embedded => {
             // TODO: see threadEnter
         },
@@ -245,7 +255,8 @@ pub fn displayRealized(self: *const OpenGL) void {
             );
         },
 
-        else => @compileError("only GTK should be calling displayRealized"),
+        // displayRealized is GTK-specific; other runtimes should not call it.
+        else => {},
     }
 }
 

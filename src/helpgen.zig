@@ -13,6 +13,9 @@ pub fn main() !void {
 
     var buf: [4096]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&buf);
+    // Use streaming mode: the build system captures stdout via a pipe,
+    // and pipes do not support ftruncate (used by positional mode's end()).
+    stdout.mode = .streaming;
     const writer = &stdout.interface;
     try writer.writeAll(
         \\// THIS FILE IS AUTO GENERATED
