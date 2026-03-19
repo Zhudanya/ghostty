@@ -26,4 +26,7 @@ glad.zip
 
 vgcore.*
 
-.claude/
+.claude/docs/
+.claude/ralph-loop.local.md
+.claude/settings.local.json
+.claude/push-approved

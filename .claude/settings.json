@@ -1,0 +1,64 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(zig build:*)",
+      "Bash(zig fmt:*)",
+      "Bash(git:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(rm:*)",
+      "Bash(cat:*)",
+      "Bash(wc:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Bash(echo:*)",
+      "Bash(cd:*)",
+      "Edit(src/apprt/windows/**)",
+      "Edit(src/apprt/windows.zig)",
+      "Edit(src/apprt/runtime.zig)",
+      "Edit(src/apprt.zig)",
+      "Edit(src/apprt/structs.zig)",
+      "Edit(src/os/windows.zig)",
+      "Edit(.claude/**)",
+      "Edit(CLAUDE.md)",
+      "Edit(ARCHITECTURE.md)",
+      "Write(src/apprt/windows/**)",
+      "Write(src/apprt/windows.zig)",
+      "Write(.claude/**)",
+      "Read"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/constitution-guard.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/push-gate.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/post-commit-review.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
