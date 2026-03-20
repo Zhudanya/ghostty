@@ -1,5 +1,5 @@
 /// Windows apprt App implementation.
-/// Provides a Win32 window with OpenGL context and message loop for Ghostty.
+/// Manages multiple windows, each with its own Surface and OpenGL context.
 const App = @This();
 
 const std = @import("std");
@@ -21,37 +21,27 @@ const log = std.log.scoped(.windows);
 /// WGL context must be on the same thread that created it.
 pub const must_draw_from_app_thread = true;
 
+/// Window class name (shared by all windows).
+pub const CLASS_NAME = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyWindowClass");
+pub const WINDOW_TITLE = std.unicode.utf8ToUtf16LeStringLiteral("Ghostty");
+
 /// Core app reference
 core_app: *CoreApp,
 
-/// The single surface for Phase 1
-surface: ?*Surface = null,
+/// All active surfaces. Each surface owns its own HWND.
+surfaces: std.ArrayListUnmanaged(*Surface),
 
-/// Win32 window handle
-hwnd: ?win32.HWND = null,
-
-/// Device context for OpenGL
-hdc: ?win32.HDC = null,
-
-/// OpenGL rendering context
-hglrc: ?win32.HGLRC = null,
+/// Primary OpenGL context for wglShareLists (first surface's context).
+primary_hglrc: ?win32.HGLRC = null,
 
 /// Whether the app is still running
 running: bool = true,
-
-/// Render timer ID
-render_timer: usize = 0,
 
 /// Wakeup event handle for cross-thread signaling
 wakeup_event: ?std.os.windows.HANDLE = null,
 
 /// Global pointer for WndProc callback (WndProc is a C callback, no context)
 var g_app: ?*App = null;
-
-const CLASS_NAME = std.unicode.utf8ToUtf16LeStringLiteral("GhosttyWindowClass");
-const WINDOW_TITLE = std.unicode.utf8ToUtf16LeStringLiteral("Ghostty");
-const RENDER_TIMER_ID: usize = 1;
-const RENDER_INTERVAL_MS: u32 = 16; // ~60 FPS
 
 pub fn init(
     self: *App,
@@ -61,10 +51,11 @@ pub fn init(
     _ = opts;
     self.* = .{
         .core_app = core_app,
+        .surfaces = .{},
     };
     g_app = self;
 
-    // Register window class
+    // Register window class (shared by all windows)
     const wc = win32.WNDCLASSEXW{
         .lpfnWndProc = wndProc,
         .hInstance = null,
@@ -77,97 +68,19 @@ pub fn init(
         return error.WindowClassRegistrationFailed;
     }
 
-    // Create window
-    self.hwnd = win32.user32.CreateWindowExW(
-        0, // dwExStyle
-        CLASS_NAME,
-        WINDOW_TITLE,
-        win32.WS_OVERLAPPEDWINDOW | win32.WS_VISIBLE,
-        win32.CW_USEDEFAULT, // x
-        win32.CW_USEDEFAULT, // y
-        1024, // width
-        768, // height
-        null, // parent
-        null, // menu
-        null, // hInstance
-        null, // lpParam
-    );
-
-    if (self.hwnd == null) {
-        log.err("CreateWindowExW failed", .{});
-        return error.WindowCreationFailed;
-    }
-
-    // Setup OpenGL context
-    try self.initOpenGL();
-
-    // Show window
-    _ = win32.user32.ShowWindow(self.hwnd.?, win32.SW_SHOW);
-    _ = win32.user32.UpdateWindow(self.hwnd.?);
-
-    // Start render timer (~60fps)
-    self.render_timer = win32.user32.SetTimer(self.hwnd, RENDER_TIMER_ID, RENDER_INTERVAL_MS, null);
-
     // Create wakeup event for cross-thread signaling
     self.wakeup_event = win32.CreateEventW(null, windows_os.TRUE, windows_os.FALSE, null);
 
-    log.info("Windows apprt initialized: hwnd={*}", .{self.hwnd.?});
-}
-
-fn initOpenGL(self: *App) !void {
-    self.hdc = win32.user32.GetDC(self.hwnd);
-    if (self.hdc == null) {
-        log.err("GetDC failed", .{});
-        return error.GetDCFailed;
-    }
-
-    // Setup pixel format for OpenGL
-    var pfd = win32.PIXELFORMATDESCRIPTOR{
-        .dwFlags = win32.PFD_DRAW_TO_WINDOW | win32.PFD_SUPPORT_OPENGL | win32.PFD_DOUBLEBUFFER,
-        .iPixelType = win32.PFD_TYPE_RGBA,
-        .cColorBits = 32,
-        .cDepthBits = 24,
-        .cStencilBits = 8,
-        .iLayerType = win32.PFD_MAIN_PLANE,
-    };
-
-    const pixel_format = win32.gdi32.ChoosePixelFormat(self.hdc.?, &pfd);
-    if (pixel_format == 0) {
-        log.err("ChoosePixelFormat failed", .{});
-        return error.ChoosePixelFormatFailed;
-    }
-
-    if (win32.gdi32.SetPixelFormat(self.hdc.?, pixel_format, &pfd) == 0) {
-        log.err("SetPixelFormat failed", .{});
-        return error.SetPixelFormatFailed;
-    }
-
-    // Create OpenGL context
-    self.hglrc = win32.opengl32.wglCreateContext(self.hdc.?);
-    if (self.hglrc == null) {
-        log.err("wglCreateContext failed", .{});
-        return error.WglCreateContextFailed;
-    }
-
-    if (win32.opengl32.wglMakeCurrent(self.hdc, self.hglrc) == 0) {
-        log.err("wglMakeCurrent failed", .{});
-        return error.WglMakeCurrentFailed;
-    }
-
-    log.info("OpenGL context created successfully", .{});
+    log.info("Windows apprt initialized (multi-window)", .{});
 }
 
 pub fn run(self: *App) !void {
     log.info("entering Win32 message loop", .{});
 
     // Create the initial terminal surface
-    const alloc = self.core_app.alloc;
-    var surface = try alloc.create(Surface);
-    errdefer alloc.destroy(surface);
-    try surface.init(self);
-    self.surface = surface;
+    try self.newSurface();
 
-    log.info("terminal surface created, starting message loop", .{});
+    log.info("initial surface created, starting message loop", .{});
 
     // Main message loop using MsgWaitForMultipleObjects for efficient waiting
     var msg: win32.MSG = undefined;
@@ -176,23 +89,20 @@ pub fn run(self: *App) !void {
     const handle_count: u32 = if (self.wakeup_event != null) 1 else 0;
 
     while (self.running) {
-        // Wait for either wakeup event or Windows messages
         const wait_result = win32.MsgWaitForMultipleObjects(
             handle_count,
             handles,
-            windows_os.FALSE, // bWaitAll
-            windows_os.INFINITE, // wait indefinitely
+            windows_os.FALSE,
+            windows_os.INFINITE,
             win32.QS_ALLINPUT,
         );
 
         if (!self.running) break;
 
-        // If wakeup event was signaled, reset it
         if (wait_result == win32.WAIT_OBJECT_0 and self.wakeup_event != null) {
             _ = win32.ResetEvent(self.wakeup_event.?);
         }
 
-        // Process all pending messages
         while (win32.user32.PeekMessageW(&msg, null, 0, 0, win32.PM_REMOVE) != 0) {
             if (msg.message == win32.WM_QUIT) {
                 self.running = false;
@@ -204,7 +114,6 @@ pub fn run(self: *App) !void {
 
         if (!self.running) break;
 
-        // Tick core app (drains mailbox, processes surface messages)
         self.core_app.tick(self) catch |err| {
             log.err("core_app.tick error: {}", .{err});
         };
@@ -213,32 +122,69 @@ pub fn run(self: *App) !void {
     log.info("Win32 message loop exited", .{});
 }
 
-pub fn terminate(self: *App) void {
-    // Cleanup surface
-    if (self.surface) |surface| {
-        self.core_app.deleteSurface(surface);
-        surface.deinit();
-        self.core_app.alloc.destroy(surface);
-        self.surface = null;
+/// Create a new surface with its own window.
+fn newSurface(self: *App) !void {
+    const alloc = self.core_app.alloc;
+    const surface = try alloc.create(Surface);
+    errdefer alloc.destroy(surface);
+    try surface.init(self);
+    try self.surfaces.append(alloc, surface);
+    log.info("new surface created, total={}", .{self.surfaces.items.len});
+}
+
+/// Remove a surface from the list and clean it up.
+fn closeSurface(self: *App, surface: *Surface) void {
+    // Remove from our list
+    var i: usize = 0;
+    while (i < self.surfaces.items.len) {
+        if (self.surfaces.items[i] == surface) {
+            _ = self.surfaces.swapRemove(i);
+            continue;
+        }
+        i += 1;
     }
 
-    if (self.render_timer != 0) {
-        _ = win32.user32.KillTimer(self.hwnd, self.render_timer);
+    // Unregister from core app and clean up
+    self.core_app.deleteSurface(surface);
+    surface.deinit();
+    self.core_app.alloc.destroy(surface);
+
+    log.info("surface closed, remaining={}", .{self.surfaces.items.len});
+
+    // If no surfaces remain, quit
+    if (self.surfaces.items.len == 0) {
+        self.running = false;
+        win32.user32.PostQuitMessage(0);
     }
+}
+
+/// Find a surface by its HWND.
+fn findSurfaceByHwnd(self: *App, hwnd: win32.HWND) ?*Surface {
+    for (self.surfaces.items) |surface| {
+        if (surface.hwnd) |surface_hwnd| {
+            if (surface_hwnd == hwnd) return surface;
+        }
+    }
+    return null;
+}
+
+pub fn terminate(self: *App) void {
+    // Clean up all surfaces
+    const alloc = self.core_app.alloc;
+    while (self.surfaces.items.len > 0) {
+        const surface = self.surfaces.items[self.surfaces.items.len - 1];
+        _ = self.surfaces.pop();
+        self.core_app.deleteSurface(surface);
+        surface.deinit();
+        alloc.destroy(surface);
+    }
+    self.surfaces.deinit(alloc);
+
     if (self.wakeup_event) |evt| {
         std.os.windows.CloseHandle(evt);
         self.wakeup_event = null;
     }
-    if (self.hglrc) |hglrc| {
-        _ = win32.opengl32.wglMakeCurrent(null, null);
-        _ = win32.opengl32.wglDeleteContext(hglrc);
-    }
-    if (self.hdc) |hdc| {
-        _ = win32.user32.ReleaseDC(self.hwnd, hdc);
-    }
-    if (self.hwnd) |hwnd| {
-        _ = win32.user32.DestroyWindow(hwnd);
-    }
+
     g_app = null;
     log.info("Windows apprt terminated", .{});
 }
@@ -256,21 +202,52 @@ pub fn performAction(
     comptime action: apprt.Action.Key,
     value: apprt.Action.Value(action),
 ) !bool {
-    _ = target;
-
     switch (action) {
-        .quit, .close_window => {
+        .new_window => {
+            try self.newSurface();
+            return true;
+        },
+        .quit => {
             self.running = false;
             return true;
         },
+        .close_window => {
+            // Close the target surface's window, or all if target is app
+            switch (target) {
+                .app => {
+                    self.running = false;
+                },
+                .surface => |cs| {
+                    // Find the Surface that wraps this CoreSurface
+                    for (self.surfaces.items) |surface| {
+                        if (surface.initialized and &surface.core_surface == cs) {
+                            self.closeSurface(surface);
+                            break;
+                        }
+                    }
+                },
+            }
+            return true;
+        },
         .set_title => {
-            if (self.hwnd) |hwnd| {
-                // Convert title to UTF-16
+            // Set title on the target surface's window
+            const hwnd = switch (target) {
+                .surface => |cs| hwnd: {
+                    for (self.surfaces.items) |surface| {
+                        if (surface.initialized and &surface.core_surface == cs) {
+                            break :hwnd surface.hwnd;
+                        }
+                    }
+                    break :hwnd null;
+                },
+                .app => if (self.surfaces.items.len > 0) self.surfaces.items[0].hwnd else null,
+            };
+            if (hwnd) |h| {
                 var buf: [256]u16 = undefined;
                 const len = std.unicode.utf8ToUtf16Le(&buf, value.title) catch 0;
                 if (len < buf.len) {
                     buf[len] = 0;
-                    _ = win32.user32.SetWindowTextW(hwnd, @ptrCast(&buf));
+                    _ = win32.user32.SetWindowTextW(h, @ptrCast(&buf));
                 }
             }
             return true;
@@ -280,17 +257,22 @@ pub fn performAction(
             return true;
         },
         .render => {
-            // Redraw triggered by renderer thread via redraw_surface message.
-            // Since must_draw_from_app_thread = true, we draw on the app thread.
-            if (self.surface) |surface| {
-                if (surface.initialized) {
-                    surface.core_surface.renderer.drawFrame(false) catch |err| {
-                        log.warn("drawFrame error: {}", .{err});
-                    };
-                    if (self.hdc) |hdc| {
-                        _ = win32.gdi32.SwapBuffers(hdc);
+            // Find the target surface and draw
+            switch (target) {
+                .surface => |cs| {
+                    for (self.surfaces.items) |surface| {
+                        if (surface.initialized and &surface.core_surface == cs) {
+                            surface.drawFrame();
+                            break;
+                        }
                     }
-                }
+                },
+                .app => {
+                    // Render all surfaces
+                    for (self.surfaces.items) |surface| {
+                        surface.drawFrame();
+                    }
+                },
             }
             return true;
         },
@@ -311,26 +293,29 @@ pub fn redrawInspector(_: *App, surface: *Surface) void {
     surface.redrawInspector();
 }
 
-/// Win32 window procedure — C callback, uses global g_app pointer.
+/// Win32 window procedure — routes messages to the correct Surface by HWND.
 fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win32.LPARAM) callconv(.winapi) win32.LRESULT {
     const app = g_app orelse return win32.user32.DefWindowProcW(hwnd, msg, wParam, lParam);
 
     switch (msg) {
         win32.WM_CLOSE => {
-            app.running = false;
-            win32.user32.PostQuitMessage(0);
+            // Close this specific window
+            if (app.findSurfaceByHwnd(hwnd)) |surface| {
+                // Nullify HWND before closeSurface to avoid double DestroyWindow
+                surface.hwnd = null;
+                app.closeSurface(surface);
+            }
             return 0;
         },
         win32.WM_DESTROY => {
-            app.running = false;
-            win32.user32.PostQuitMessage(0);
+            // Already handled by WM_CLOSE
             return 0;
         },
         win32.WM_SIZE => {
             const width: u32 = @truncate(@as(usize, @bitCast(lParam)) & 0xFFFF);
             const height: u32 = @truncate((@as(usize, @bitCast(lParam)) >> 16) & 0xFFFF);
             if (width > 0 and height > 0) {
-                if (app.surface) |surface| {
+                if (app.findSurfaceByHwnd(hwnd)) |surface| {
                     surface.width = width;
                     surface.height = height;
                     if (surface.initialized) {
@@ -346,27 +331,22 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
             return 0;
         },
         win32.WM_PAINT => {
-            // Handled in main loop render
             return win32.user32.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         win32.WM_KEYDOWN, win32.WM_KEYUP => {
-            const surface = if (app.surface) |s| (if (s.initialized) &s.core_surface else null) else null;
-            if (surface) |s| {
+            const surface = app.findSurfaceByHwnd(hwnd);
+            const cs = if (surface) |s| (if (s.initialized) &s.core_surface else null) else null;
+            if (cs) |s| {
                 const vk: u16 = @truncate(wParam);
                 const ghostty_key = key.keyFromVirtualKey(vk);
                 const action: input_key.Action = if (msg == win32.WM_KEYDOWN) .press else .release;
                 const mods = key.modsFromKeyState(win32.user32.GetKeyState);
 
-                // Handle non-character keys and control keys here.
-                // Regular printable characters are handled by WM_CHAR.
                 switch (ghostty_key) {
-                    // Navigation
                     .arrow_left, .arrow_right, .arrow_up, .arrow_down,
                     .home, .end, .page_up, .page_down,
                     .insert, .delete,
-                    // Control keys that must NOT go through WM_CHAR
                     .backspace, .enter, .tab, .escape,
-                    // Function keys
                     .f1, .f2, .f3, .f4, .f5, .f6,
                     .f7, .f8, .f9, .f10, .f11, .f12,
                     .f13, .f14, .f15, .f16, .f17, .f18,
@@ -383,18 +363,15 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
                     else => {},
                 }
             }
-            // Let TranslateMessage generate WM_CHAR for character keys
             return win32.user32.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         win32.WM_CHAR => {
-            const surface = if (app.surface) |s| (if (s.initialized) &s.core_surface else null) else null;
-            if (surface) |s| {
+            const surface = app.findSurfaceByHwnd(hwnd);
+            const cs = if (surface) |s| (if (s.initialized) &s.core_surface else null) else null;
+            if (cs) |s| {
                 const wchar: u16 = @truncate(wParam);
-                // Skip control characters already handled by WM_KEYDOWN
-                // (backspace=0x08, tab=0x09, enter=0x0D, escape=0x1B)
                 if (wchar < 0x20 or wchar == 0x7F) return 0;
 
-                // Convert UTF-16 to UTF-8
                 var utf8_buf: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(@intCast(wchar), &utf8_buf) catch 0;
                 if (len > 0) {
@@ -410,11 +387,10 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
             return 0;
         },
         win32.WM_MOUSEWHEEL => {
-            const surface = if (app.surface) |s| (if (s.initialized) &s.core_surface else null) else null;
-            if (surface) |s| {
+            const surface = app.findSurfaceByHwnd(hwnd);
+            const cs = if (surface) |s| (if (s.initialized) &s.core_surface else null) else null;
+            if (cs) |s| {
                 const delta = win32.GET_WHEEL_DELTA_WPARAM(wParam);
-                // Convert wheel delta to normalized scroll offset.
-                // WHEEL_DELTA (120) = 1 line of scroll.
                 const yoff: f64 = @as(f64, @floatFromInt(delta)) / @as(f64, @floatFromInt(win32.WHEEL_DELTA));
                 s.scrollCallback(0, yoff, .{}) catch |err| {
                     log.warn("scrollCallback error: {}", .{err});
@@ -423,8 +399,7 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
             return 0;
         },
         win32.WM_TIMER => {
-            if (wParam == RENDER_TIMER_ID) {
-                // Trigger redraw
+            if (wParam == 1) { // RENDER_TIMER_ID
                 _ = win32.user32.InvalidateRect(hwnd, null, 0);
             }
             return 0;

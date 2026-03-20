@@ -287,6 +287,7 @@ pub const exp = struct {
         pub extern "opengl32" fn wglCreateContext(hdc: HDC) callconv(.winapi) ?HGLRC;
         pub extern "opengl32" fn wglMakeCurrent(hdc: ?HDC, hglrc: ?HGLRC) callconv(.winapi) windows.BOOL;
         pub extern "opengl32" fn wglDeleteContext(hglrc: HGLRC) callconv(.winapi) windows.BOOL;
+        pub extern "opengl32" fn wglShareLists(hglrc1: HGLRC, hglrc2: HGLRC) callconv(.winapi) windows.BOOL;
         pub extern "opengl32" fn wglGetProcAddress(lpszProc: [*:0]const u8) callconv(.winapi) ?*anyopaque;
     };
 
