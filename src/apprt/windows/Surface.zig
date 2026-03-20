@@ -111,7 +111,17 @@ pub fn getSize(self: *const Self) !apprt.SurfaceSize {
     return .{ .width = self.width, .height = self.height };
 }
 
-pub fn getCursorPos(_: *const Self) !apprt.CursorPos {
+pub fn getCursorPos(self: *const Self) !apprt.CursorPos {
+    if (self.app.hwnd) |hwnd| {
+        var pt: win32.POINT = undefined;
+        if (win32.user32_ext.GetCursorPos(&pt) != 0) {
+            _ = win32.user32_ext.ScreenToClient(hwnd, &pt);
+            return .{
+                .x = @floatFromInt(pt.x),
+                .y = @floatFromInt(pt.y),
+            };
+        }
+    }
     return .{ .x = 0, .y = 0 };
 }
 
@@ -120,19 +130,87 @@ pub fn supportsClipboard(_: *const Self, clipboard_type: apprt.Clipboard) bool {
 }
 
 pub fn clipboardRequest(
-    _: *Self,
+    self: *Self,
     _: apprt.Clipboard,
-    _: apprt.ClipboardRequest,
+    req: apprt.ClipboardRequest,
 ) !bool {
-    return false;
+    // Read text from the Windows clipboard
+    if (win32.OpenClipboard(self.app.hwnd) == 0) return false;
+    defer _ = win32.CloseClipboard();
+
+    const handle = win32.GetClipboardData(win32.CF_UNICODETEXT) orelse return false;
+    const ptr = win32.GlobalLock(handle) orelse return false;
+    defer _ = win32.GlobalUnlock(handle);
+
+    // Convert UTF-16 to UTF-8
+    const wide_ptr: [*]const u16 = @ptrCast(@alignCast(ptr));
+    var wide_len: usize = 0;
+    while (wide_ptr[wide_len] != 0) : (wide_len += 1) {}
+    const wide_slice = wide_ptr[0..wide_len];
+
+    // First pass: calculate required UTF-8 buffer size
+    const alloc = self.app.core_app.alloc;
+    var utf8_size: usize = 0;
+    for (wide_slice) |wc| {
+        if (wc < 0x80) {
+            utf8_size += 1;
+        } else if (wc < 0x800) {
+            utf8_size += 2;
+        } else {
+            utf8_size += 3;
+        }
+    }
+
+    // Allocate buffer with sentinel null terminator
+    const raw_buf = alloc.alloc(u8, utf8_size + 1) catch return false;
+    defer alloc.free(raw_buf);
+    const written = std.unicode.utf16LeToUtf8(raw_buf[0..utf8_size], wide_slice) catch return false;
+    raw_buf[written] = 0;
+
+    const sentinel_buf: [:0]const u8 = raw_buf[0..written :0];
+    try self.core_surface.completeClipboardRequest(req, sentinel_buf, false);
+    return true;
 }
 
 pub fn setClipboard(
-    _: *Self,
+    self: *Self,
     _: apprt.Clipboard,
-    _: []const apprt.ClipboardContent,
+    contents: []const apprt.ClipboardContent,
     _: bool,
-) !void {}
+) !void {
+    if (contents.len == 0) return;
+
+    // Use the first content entry
+    const data = contents[0].data;
+
+    // Convert UTF-8 to UTF-16 using stack buffer for small strings, heap for large
+    const alloc = self.app.core_app.alloc;
+    var stack_buf: [4096]u16 = undefined;
+    const wide_len = std.unicode.utf8ToUtf16Le(&stack_buf, data) catch 0;
+    if (wide_len == 0) return;
+
+    // Allocate global memory for clipboard (includes null terminator)
+    const byte_len = (wide_len + 1) * @sizeOf(u16);
+    const hmem = win32.GlobalAlloc(win32.GMEM_MOVEABLE, byte_len) orelse return;
+    _ = alloc;
+
+    const dest = win32.GlobalLock(hmem) orelse {
+        _ = win32.GlobalFree(hmem);
+        return;
+    };
+    const dest_wide: [*]u16 = @ptrCast(@alignCast(dest));
+    @memcpy(dest_wide[0..wide_len], stack_buf[0..wide_len]);
+    dest_wide[wide_len] = 0;
+    _ = win32.GlobalUnlock(hmem);
+
+    if (win32.OpenClipboard(self.app.hwnd) == 0) {
+        _ = win32.GlobalFree(hmem);
+        return;
+    }
+    _ = win32.EmptyClipboard();
+    _ = win32.SetClipboardData(win32.CF_UNICODETEXT, hmem);
+    _ = win32.CloseClipboard();
+}
 
 pub fn defaultTermioEnv(self: *Self) !std.process.EnvMap {
     _ = self;

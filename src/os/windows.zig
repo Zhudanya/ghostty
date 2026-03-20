@@ -290,6 +290,66 @@ pub const exp = struct {
         pub extern "opengl32" fn wglGetProcAddress(lpszProc: [*:0]const u8) callconv(.winapi) ?*anyopaque;
     };
 
+    // ── Event / Wait ─────────────────────────────────────────────────
+    pub const WAIT_OBJECT_0: windows.DWORD = 0;
+    pub const QS_ALLINPUT: windows.DWORD = 0x04FF;
+
+    pub extern "kernel32" fn CreateEventW(
+        lpEventAttributes: ?*anyopaque,
+        bManualReset: windows.BOOL,
+        bInitialState: windows.BOOL,
+        lpName: ?[*:0]const u16,
+    ) callconv(.winapi) ?windows.HANDLE;
+    pub extern "kernel32" fn SetEvent(hEvent: windows.HANDLE) callconv(.winapi) windows.BOOL;
+    pub extern "kernel32" fn ResetEvent(hEvent: windows.HANDLE) callconv(.winapi) windows.BOOL;
+    pub extern "user32" fn MsgWaitForMultipleObjects(
+        nCount: windows.DWORD,
+        pHandles: ?[*]const windows.HANDLE,
+        bWaitAll: windows.BOOL,
+        dwMilliseconds: windows.DWORD,
+        dwWakeMask: windows.DWORD,
+    ) callconv(.winapi) windows.DWORD;
+
+    // ── Clipboard ─────────────────────────────────────────────────────
+    pub const CF_UNICODETEXT: UINT = 13;
+    pub const GMEM_MOVEABLE: UINT = 0x0002;
+
+    pub extern "user32" fn OpenClipboard(hWndNewOwner: ?HWND) callconv(.winapi) windows.BOOL;
+    pub extern "user32" fn CloseClipboard() callconv(.winapi) windows.BOOL;
+    pub extern "user32" fn EmptyClipboard() callconv(.winapi) windows.BOOL;
+    pub extern "user32" fn GetClipboardData(uFormat: UINT) callconv(.winapi) ?windows.HANDLE;
+    pub extern "user32" fn SetClipboardData(uFormat: UINT, hMem: windows.HANDLE) callconv(.winapi) ?windows.HANDLE;
+    pub extern "kernel32" fn GlobalAlloc(uFlags: UINT, dwBytes: usize) callconv(.winapi) ?windows.HANDLE;
+    pub extern "kernel32" fn GlobalLock(hMem: windows.HANDLE) callconv(.winapi) ?[*]u8;
+    pub extern "kernel32" fn GlobalUnlock(hMem: windows.HANDLE) callconv(.winapi) windows.BOOL;
+    pub extern "kernel32" fn GlobalFree(hMem: windows.HANDLE) callconv(.winapi) ?windows.HANDLE;
+
+    // ── Mouse ─────────────────────────────────────────────────────────
+    pub const WHEEL_DELTA: i16 = 120;
+
+    pub const user32_ext = struct {
+        pub extern "user32" fn GetCursorPos(lpPoint: *POINT) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn ScreenToClient(hWnd: HWND, lpPoint: *POINT) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn MessageBeep(uType: UINT) callconv(.winapi) windows.BOOL;
+    };
+
+    // ── Helpers ───────────────────────────────────────────────────────
+
+    /// Extract wheel delta from WM_MOUSEWHEEL wParam (high word, signed).
+    pub inline fn GET_WHEEL_DELTA_WPARAM(wParam: WPARAM) i16 {
+        return @bitCast(@as(u16, @truncate(wParam >> 16)));
+    }
+
+    /// Extract x coordinate from lParam (low word, signed).
+    pub inline fn GET_X_LPARAM(lParam: LPARAM) i16 {
+        return @bitCast(@as(u16, @truncate(@as(usize, @bitCast(lParam)))));
+    }
+
+    /// Extract y coordinate from lParam (high word, signed).
+    pub inline fn GET_Y_LPARAM(lParam: LPARAM) i16 {
+        return @bitCast(@as(u16, @truncate(@as(usize, @bitCast(lParam)) >> 16)));
+    }
+
     // IDC_ARROW = 32512
     pub const IDC_ARROW: usize = 32512;
     // SW_SHOW = 5

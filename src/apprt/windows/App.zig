@@ -13,7 +13,8 @@ const CoreApp = @import("../../App.zig");
 const CoreSurface = @import("../../Surface.zig");
 const Surface = @import("Surface.zig");
 const key = @import("key.zig");
-const win32 = @import("../../os/windows.zig").exp;
+const windows_os = @import("../../os/windows.zig");
+const win32 = windows_os.exp;
 
 const log = std.log.scoped(.windows);
 
@@ -40,6 +41,9 @@ running: bool = true,
 
 /// Render timer ID
 render_timer: usize = 0,
+
+/// Wakeup event handle for cross-thread signaling
+wakeup_event: ?std.os.windows.HANDLE = null,
 
 /// Global pointer for WndProc callback (WndProc is a C callback, no context)
 var g_app: ?*App = null;
@@ -104,6 +108,9 @@ pub fn init(
     // Start render timer (~60fps)
     self.render_timer = win32.user32.SetTimer(self.hwnd, RENDER_TIMER_ID, RENDER_INTERVAL_MS, null);
 
+    // Create wakeup event for cross-thread signaling
+    self.wakeup_event = win32.CreateEventW(null, windows_os.TRUE, windows_os.FALSE, null);
+
     log.info("Windows apprt initialized: hwnd={*}", .{self.hwnd.?});
 }
 
@@ -162,9 +169,29 @@ pub fn run(self: *App) !void {
 
     log.info("terminal surface created, starting message loop", .{});
 
-    // Main message loop
+    // Main message loop using MsgWaitForMultipleObjects for efficient waiting
     var msg: win32.MSG = undefined;
+    var handle_arr: [1]std.os.windows.HANDLE = .{self.wakeup_event orelse std.os.windows.INVALID_HANDLE_VALUE};
+    const handles: ?[*]const std.os.windows.HANDLE = if (self.wakeup_event != null) &handle_arr else null;
+    const handle_count: u32 = if (self.wakeup_event != null) 1 else 0;
+
     while (self.running) {
+        // Wait for either wakeup event or Windows messages
+        const wait_result = win32.MsgWaitForMultipleObjects(
+            handle_count,
+            handles,
+            windows_os.FALSE, // bWaitAll
+            windows_os.INFINITE, // wait indefinitely
+            win32.QS_ALLINPUT,
+        );
+
+        if (!self.running) break;
+
+        // If wakeup event was signaled, reset it
+        if (wait_result == win32.WAIT_OBJECT_0 and self.wakeup_event != null) {
+            _ = win32.ResetEvent(self.wakeup_event.?);
+        }
+
         // Process all pending messages
         while (win32.user32.PeekMessageW(&msg, null, 0, 0, win32.PM_REMOVE) != 0) {
             if (msg.message == win32.WM_QUIT) {
@@ -181,13 +208,6 @@ pub fn run(self: *App) !void {
         self.core_app.tick(self) catch |err| {
             log.err("core_app.tick error: {}", .{err});
         };
-
-        // Rendering is driven by the renderer thread sending redraw_surface
-        // messages, handled by performAction(.render) which calls drawFrame + SwapBuffers.
-
-        // Sleep briefly to avoid busy-spinning (will be replaced by proper
-        // MsgWaitForMultipleObjects in Phase 2)
-        std.Thread.sleep(8 * std.time.ns_per_ms);
     }
 
     log.info("Win32 message loop exited", .{});
@@ -205,6 +225,10 @@ pub fn terminate(self: *App) void {
     if (self.render_timer != 0) {
         _ = win32.user32.KillTimer(self.hwnd, self.render_timer);
     }
+    if (self.wakeup_event) |evt| {
+        std.os.windows.CloseHandle(evt);
+        self.wakeup_event = null;
+    }
     if (self.hglrc) |hglrc| {
         _ = win32.opengl32.wglMakeCurrent(null, null);
         _ = win32.opengl32.wglDeleteContext(hglrc);
@@ -221,9 +245,8 @@ pub fn terminate(self: *App) void {
 
 /// Called from core app thread to wake the event loop.
 pub fn wakeup(self: *App) void {
-    // Invalidate window to trigger WM_PAINT, which wakes the message loop
-    if (self.hwnd) |hwnd| {
-        _ = win32.user32.InvalidateRect(hwnd, null, 0);
+    if (self.wakeup_event) |evt| {
+        _ = win32.SetEvent(evt);
     }
 }
 
@@ -234,7 +257,6 @@ pub fn performAction(
     value: apprt.Action.Value(action),
 ) !bool {
     _ = target;
-    _ = value;
 
     switch (action) {
         .quit, .close_window => {
@@ -242,8 +264,20 @@ pub fn performAction(
             return true;
         },
         .set_title => {
-            // Phase 2: update window title from terminal
-            return false;
+            if (self.hwnd) |hwnd| {
+                // Convert title to UTF-16
+                var buf: [256]u16 = undefined;
+                const len = std.unicode.utf8ToUtf16Le(&buf, value.title) catch 0;
+                if (len < buf.len) {
+                    buf[len] = 0;
+                    _ = win32.user32.SetWindowTextW(hwnd, @ptrCast(&buf));
+                }
+            }
+            return true;
+        },
+        .ring_bell => {
+            _ = win32.user32_ext.MessageBeep(0);
+            return true;
         },
         .render => {
             // Redraw triggered by renderer thread via redraw_surface message.
@@ -293,7 +327,22 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
             return 0;
         },
         win32.WM_SIZE => {
-            // Phase 2: resize surface and OpenGL viewport
+            const width: u32 = @truncate(@as(usize, @bitCast(lParam)) & 0xFFFF);
+            const height: u32 = @truncate((@as(usize, @bitCast(lParam)) >> 16) & 0xFFFF);
+            if (width > 0 and height > 0) {
+                if (app.surface) |surface| {
+                    surface.width = width;
+                    surface.height = height;
+                    if (surface.initialized) {
+                        surface.core_surface.sizeCallback(.{
+                            .width = width,
+                            .height = height,
+                        }) catch |err| {
+                            log.warn("sizeCallback error: {}", .{err});
+                        };
+                    }
+                }
+            }
             return 0;
         },
         win32.WM_PAINT => {
@@ -357,6 +406,19 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
                         .utf8 = utf8_buf[0..len],
                     }) catch {};
                 }
+            }
+            return 0;
+        },
+        win32.WM_MOUSEWHEEL => {
+            const surface = if (app.surface) |s| (if (s.initialized) &s.core_surface else null) else null;
+            if (surface) |s| {
+                const delta = win32.GET_WHEEL_DELTA_WPARAM(wParam);
+                // Convert wheel delta to normalized scroll offset.
+                // WHEEL_DELTA (120) = 1 line of scroll.
+                const yoff: f64 = @as(f64, @floatFromInt(delta)) / @as(f64, @floatFromInt(win32.WHEEL_DELTA));
+                s.scrollCallback(0, yoff, .{}) catch |err| {
+                    log.warn("scrollCallback error: {}", .{err});
+                };
             }
             return 0;
         },
