@@ -379,6 +379,16 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
                         };
                         return 0;
                     }
+                    // Ctrl+Shift+C → copy selection to clipboard
+                    if (mods.ctrl and mods.shift and ghostty_key == .key_c) {
+                        _ = s.performBindingAction(.{ .copy_to_clipboard = .mixed }) catch {};
+                        return 0;
+                    }
+                    // Ctrl+Shift+V → paste from clipboard
+                    if (mods.ctrl and mods.shift and ghostty_key == .key_v) {
+                        _ = s.performBindingAction(.paste_from_clipboard) catch {};
+                        return 0;
+                    }
                 }
 
                 // Send to keyCallback if it's a special key OR if Ctrl/Alt is held
@@ -415,6 +425,58 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
             }
             return 0;
         },
+        win32.WM_LBUTTONDOWN, win32.WM_RBUTTONDOWN, win32.WM_MBUTTONDOWN => {
+            const surface = app.findSurfaceByHwnd(hwnd);
+            const cs = if (surface) |s| (if (s.initialized) &s.core_surface else null) else null;
+            if (cs) |s| {
+                const button: input.MouseButton = switch (msg) {
+                    win32.WM_LBUTTONDOWN => .left,
+                    win32.WM_RBUTTONDOWN => .right,
+                    win32.WM_MBUTTONDOWN => .middle,
+                    else => .unknown,
+                };
+                const mods = key.modsFromKeyState(win32.user32.GetKeyState);
+                // Capture mouse for drag operations
+                _ = win32.user32_ext.SetCapture(hwnd);
+                // Update cursor position before button callback
+                const pos = apprt.CursorPos{
+                    .x = @floatFromInt(win32.GET_X_LPARAM(lParam)),
+                    .y = @floatFromInt(win32.GET_Y_LPARAM(lParam)),
+                };
+                s.cursorPosCallback(pos, mods) catch {};
+                _ = s.mouseButtonCallback(.press, button, mods) catch {};
+            }
+            return 0;
+        },
+        win32.WM_LBUTTONUP, win32.WM_RBUTTONUP, win32.WM_MBUTTONUP => {
+            const surface = app.findSurfaceByHwnd(hwnd);
+            const cs = if (surface) |s| (if (s.initialized) &s.core_surface else null) else null;
+            if (cs) |s| {
+                const button: input.MouseButton = switch (msg) {
+                    win32.WM_LBUTTONUP => .left,
+                    win32.WM_RBUTTONUP => .right,
+                    win32.WM_MBUTTONUP => .middle,
+                    else => .unknown,
+                };
+                const mods = key.modsFromKeyState(win32.user32.GetKeyState);
+                _ = win32.user32_ext.ReleaseCapture();
+                _ = s.mouseButtonCallback(.release, button, mods) catch {};
+            }
+            return 0;
+        },
+        win32.WM_MOUSEMOVE => {
+            const surface = app.findSurfaceByHwnd(hwnd);
+            const cs = if (surface) |s| (if (s.initialized) &s.core_surface else null) else null;
+            if (cs) |s| {
+                const pos = apprt.CursorPos{
+                    .x = @floatFromInt(win32.GET_X_LPARAM(lParam)),
+                    .y = @floatFromInt(win32.GET_Y_LPARAM(lParam)),
+                };
+                const mods = key.modsFromKeyState(win32.user32.GetKeyState);
+                s.cursorPosCallback(pos, mods) catch {};
+            }
+            return 0;
+        },
         win32.WM_MOUSEWHEEL => {
             const surface = app.findSurfaceByHwnd(hwnd);
             const cs = if (surface) |s| (if (s.initialized) &s.core_surface else null) else null;
@@ -426,6 +488,74 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
                 };
             }
             return 0;
+        },
+        win32.WM_MOUSEHWHEEL => {
+            const surface = app.findSurfaceByHwnd(hwnd);
+            const cs = if (surface) |s| (if (s.initialized) &s.core_surface else null) else null;
+            if (cs) |s| {
+                const delta = win32.GET_WHEEL_DELTA_WPARAM(wParam);
+                const xoff: f64 = @as(f64, @floatFromInt(delta)) / @as(f64, @floatFromInt(win32.WHEEL_DELTA));
+                s.scrollCallback(xoff, 0, .{}) catch {};
+            }
+            return 0;
+        },
+        win32.WM_DPICHANGED => {
+            if (app.findSurfaceByHwnd(hwnd)) |surface| {
+                if (surface.initialized) {
+                    // Resize window to the suggested rect from Windows
+                    const suggested: *const win32.RECT = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                    _ = win32.user32_ext2.SetWindowPos(
+                        hwnd,
+                        null,
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        0x0040, // SWP_NOZORDER | ...
+                    );
+                    // The WM_SIZE that follows will trigger sizeCallback
+                    // which recalculates grid metrics with the new DPI
+                }
+            }
+            return 0;
+        },
+        win32.WM_IME_COMPOSITION => {
+            const surface = app.findSurfaceByHwnd(hwnd);
+            const cs = if (surface) |s| (if (s.initialized) &s.core_surface else null) else null;
+            if (cs) |s| {
+                // Handle committed text (GCS_RESULTSTR)
+                if (lParam & @as(win32.LPARAM, @intCast(win32.GCS_RESULTSTR)) != 0) {
+                    const himc = win32.imm32.ImmGetContext(hwnd);
+                    if (himc) |ctx| {
+                        defer _ = win32.imm32.ImmReleaseContext(hwnd, ctx);
+                        // Get required buffer size
+                        const size = win32.imm32.ImmGetCompositionStringW(ctx, win32.GCS_RESULTSTR, null, 0);
+                        if (size > 0) {
+                            var buf: [256]u8 = undefined;
+                            const buf_size: u32 = @intCast(@min(@as(usize, @intCast(size)), buf.len));
+                            const actual = win32.imm32.ImmGetCompositionStringW(ctx, win32.GCS_RESULTSTR, &buf, buf_size);
+                            if (actual > 0) {
+                                // Convert UTF-16 result to UTF-8
+                                const wide_len = @as(usize, @intCast(actual)) / 2;
+                                const wide_ptr: [*]const u16 = @ptrCast(@alignCast(&buf));
+                                var utf8_buf: [512]u8 = undefined;
+                                const utf8_len = std.unicode.utf16LeToUtf8(&utf8_buf, wide_ptr[0..wide_len]) catch 0;
+                                if (utf8_len > 0) {
+                                    const mods = key.modsFromKeyState(win32.user32.GetKeyState);
+                                    _ = s.keyCallback(.{
+                                        .action = .press,
+                                        .key = .unidentified,
+                                        .mods = mods,
+                                        .utf8 = utf8_buf[0..utf8_len],
+                                    }) catch {};
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Let DefWindowProc handle the rest (preedit display etc.)
+            return win32.user32.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         win32.WM_TIMER => {
             if (wParam == 1) { // RENDER_TIMER_ID

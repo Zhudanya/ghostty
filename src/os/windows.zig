@@ -222,8 +222,27 @@ pub const exp = struct {
     pub const WM_MOUSEMOVE = 0x0200;
     pub const WM_LBUTTONDOWN = 0x0201;
     pub const WM_LBUTTONUP = 0x0202;
+    pub const WM_RBUTTONDOWN = 0x0204;
+    pub const WM_RBUTTONUP = 0x0205;
+    pub const WM_MBUTTONDOWN = 0x0207;
+    pub const WM_MBUTTONUP = 0x0208;
     pub const WM_MOUSEWHEEL = 0x020A;
+    pub const WM_MOUSEHWHEEL = 0x020E;
+    pub const WM_IME_STARTCOMPOSITION = 0x010D;
+    pub const WM_IME_ENDCOMPOSITION = 0x010E;
+    pub const WM_IME_COMPOSITION = 0x010F;
     pub const WM_DPICHANGED = 0x02E0;
+
+    // Mouse key state flags (in wParam of mouse messages)
+    pub const MK_LBUTTON = 0x0001;
+    pub const MK_RBUTTON = 0x0002;
+    pub const MK_SHIFT = 0x0004;
+    pub const MK_CONTROL = 0x0008;
+    pub const MK_MBUTTON = 0x0010;
+
+    // IME composition flags
+    pub const GCS_RESULTSTR: windows.DWORD = 0x0800;
+    pub const GCS_COMPSTR: windows.DWORD = 0x0008;
 
     // PeekMessage flags
     pub const PM_REMOVE = 0x0001;
@@ -332,6 +351,29 @@ pub const exp = struct {
         pub extern "user32" fn GetCursorPos(lpPoint: *POINT) callconv(.winapi) windows.BOOL;
         pub extern "user32" fn ScreenToClient(hWnd: HWND, lpPoint: *POINT) callconv(.winapi) windows.BOOL;
         pub extern "user32" fn MessageBeep(uType: UINT) callconv(.winapi) windows.BOOL;
+        pub extern "user32" fn SetCapture(hWnd: HWND) callconv(.winapi) ?HWND;
+        pub extern "user32" fn ReleaseCapture() callconv(.winapi) windows.BOOL;
+    };
+
+    pub const user32_ext2 = struct {
+        pub extern "user32" fn SetWindowPos(
+            hWnd: HWND,
+            hWndInsertAfter: ?HWND,
+            X: i32,
+            Y: i32,
+            cx: i32,
+            cy: i32,
+            uFlags: UINT,
+        ) callconv(.winapi) windows.BOOL;
+    };
+
+    // ── IME (imm32.dll) ──────────────────────────────────────────────
+    pub const HIMC = ?*anyopaque;
+
+    pub const imm32 = struct {
+        pub extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) HIMC;
+        pub extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: HIMC) callconv(.winapi) windows.BOOL;
+        pub extern "imm32" fn ImmGetCompositionStringW(hIMC: HIMC, dwIndex: windows.DWORD, lpBuf: ?[*]u8, dwBufLen: windows.DWORD) callconv(.winapi) i32;
     };
 
     // ── Helpers ───────────────────────────────────────────────────────
