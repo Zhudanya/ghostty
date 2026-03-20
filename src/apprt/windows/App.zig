@@ -342,7 +342,7 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
                 const action: input_key.Action = if (msg == win32.WM_KEYDOWN) .press else .release;
                 const mods = key.modsFromKeyState(win32.user32.GetKeyState);
 
-                switch (ghostty_key) {
+                const is_special = switch (ghostty_key) {
                     .arrow_left, .arrow_right, .arrow_up, .arrow_down,
                     .home, .end, .page_up, .page_down,
                     .insert, .delete,
@@ -352,17 +352,23 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
                     .f13, .f14, .f15, .f16, .f17, .f18,
                     .f19, .f20, .f21, .f22, .f23, .f24,
                     .print_screen, .scroll_lock, .pause,
-                    => {
-                        _ = s.keyCallback(.{
-                            .action = action,
-                            .key = ghostty_key,
-                            .mods = mods,
-                        }) catch {};
-                        return 0;
-                    },
-                    else => {},
+                    => true,
+                    else => false,
+                };
+
+                // Send to keyCallback if it's a special key OR if Ctrl/Alt is held
+                // (so keybindings like Ctrl+Shift+N work through Ghostty's binding system)
+                const has_ctrl_or_alt = mods.ctrl or mods.alt;
+                if (is_special or has_ctrl_or_alt) {
+                    _ = s.keyCallback(.{
+                        .action = action,
+                        .key = ghostty_key,
+                        .mods = mods,
+                    }) catch {};
+                    return 0;
                 }
             }
+            // Let TranslateMessage generate WM_CHAR for unmodified character keys
             return win32.user32.DefWindowProcW(hwnd, msg, wParam, lParam);
         },
         win32.WM_CHAR => {
