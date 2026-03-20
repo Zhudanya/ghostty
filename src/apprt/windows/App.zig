@@ -37,6 +37,9 @@ primary_hglrc: ?win32.HGLRC = null,
 /// Whether the app is still running
 running: bool = true,
 
+/// Surfaces pending close (deferred from WndProc to avoid deadlock in deinit).
+pending_close: std.ArrayListUnmanaged(*Surface) = .{},
+
 /// Wakeup event handle for cross-thread signaling
 wakeup_event: ?std.os.windows.HANDLE = null,
 
@@ -117,6 +120,13 @@ pub fn run(self: *App) !void {
         self.core_app.tick(self) catch |err| {
             log.err("core_app.tick error: {}", .{err});
         };
+
+        // Process deferred surface closes (outside WndProc to avoid deadlock)
+        while (self.pending_close.items.len > 0) {
+            const surface = self.pending_close.items[self.pending_close.items.len - 1];
+            _ = self.pending_close.pop();
+            self.closeSurface(surface);
+        }
     }
 
     log.info("Win32 message loop exited", .{});
@@ -151,8 +161,9 @@ fn closeSurface(self: *App, surface: *Surface) void {
 
     log.info("surface closed, remaining={}", .{self.surfaces.items.len});
 
-    // If no surfaces remain, quit
+    // If no surfaces remain, quit the application
     if (self.surfaces.items.len == 0) {
+        log.info("last surface closed, quitting", .{});
         self.running = false;
         win32.user32.PostQuitMessage(0);
     }
@@ -179,6 +190,7 @@ pub fn terminate(self: *App) void {
         alloc.destroy(surface);
     }
     self.surfaces.deinit(alloc);
+    self.pending_close.deinit(alloc);
 
     if (self.wakeup_event) |evt| {
         std.os.windows.CloseHandle(evt);
@@ -299,16 +311,17 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
 
     switch (msg) {
         win32.WM_CLOSE => {
-            // Close this specific window
             if (app.findSurfaceByHwnd(hwnd)) |surface| {
-                // Nullify HWND before closeSurface to avoid double DestroyWindow
+                // Defer close to main loop to avoid deadlock
+                // (CoreSurface.deinit waits for threads, can't run in WndProc)
                 surface.hwnd = null;
-                app.closeSurface(surface);
+                app.pending_close.append(app.core_app.alloc, surface) catch {};
+            } else {
+                return win32.user32.DefWindowProcW(hwnd, msg, wParam, lParam);
             }
             return 0;
         },
         win32.WM_DESTROY => {
-            // Already handled by WM_CLOSE
             return 0;
         },
         win32.WM_SIZE => {
@@ -356,9 +369,19 @@ fn wndProc(hwnd: win32.HWND, msg: win32.UINT, wParam: win32.WPARAM, lParam: win3
                     else => false,
                 };
 
-                // Send to keyCallback if it's a special key OR if Ctrl/Alt is held
-                // (so keybindings like Ctrl+Shift+N work through Ghostty's binding system)
+                // Handle built-in shortcuts directly before sending to keyCallback
                 const has_ctrl_or_alt = mods.ctrl or mods.alt;
+                if (has_ctrl_or_alt and action == .press) {
+                    // Ctrl+Shift+N → new window
+                    if (mods.ctrl and mods.shift and ghostty_key == .key_n) {
+                        app.newSurface() catch |err| {
+                            log.warn("new_window error: {}", .{err});
+                        };
+                        return 0;
+                    }
+                }
+
+                // Send to keyCallback if it's a special key OR if Ctrl/Alt is held
                 if (is_special or has_ctrl_or_alt) {
                     _ = s.keyCallback(.{
                         .action = action,
